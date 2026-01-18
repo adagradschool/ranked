@@ -214,6 +214,30 @@ class ReindexBlogResponse(BaseModel):
     chunks_indexed: int
 
 
+class QueryChromaRequest(BaseModel):
+    query: str = Field(..., min_length=1)
+    top_k: int = Field(10, ge=1, le=20)
+    max_words: int = Field(100, ge=10, le=500)
+
+
+class QueryChromaResult(BaseModel):
+    business_url: str
+    chunk: str
+    distance: float | None = None
+    score: float | None = None
+
+
+class QueryChromaTopItem(BaseModel):
+    business_url: str
+    score: float
+
+
+class QueryChromaResponse(BaseModel):
+    query: str
+    results: list[QueryChromaResult]
+    top_list: list[QueryChromaTopItem]
+
+
 app = FastAPI(title="Ranked Blog API")
 
 
@@ -422,3 +446,63 @@ def reindex_blog(payload: ReindexBlogRequest) -> ReindexBlogResponse:
     if not chunks_indexed:
         raise HTTPException(status_code=400, detail="No indexable content in HTML.")
     return ReindexBlogResponse(blog_url=payload.blog_url, chunks_indexed=chunks_indexed)
+
+
+@app.post("/query-chroma", response_model=QueryChromaResponse)
+def query_chroma(payload: QueryChromaRequest) -> QueryChromaResponse:
+    store = get_store()
+    fetch_k = min(max(payload.top_k * 3, payload.top_k), 50)
+    result = store.collection.query(
+        query_texts=[payload.query],
+        n_results=fetch_k,
+        include=["documents", "metadatas", "distances"],
+    )
+    docs = result.get("documents", [[]])[0]
+    metas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+    results: list[QueryChromaResult] = []
+    seen_businesses: set[str] = set()
+    scored_items: list[tuple[str, float]] = []
+    for doc, meta, distance in zip(docs, metas, distances):
+        business_url = (meta or {}).get("business_url", "")
+        business_key = business_url or "(none)"
+        if business_key in seen_businesses:
+            continue
+        chunk = " ".join((doc or "").split()[: payload.max_words])
+        score = float(distance) if distance is not None else None
+        results.append(
+            QueryChromaResult(
+                business_url=business_key,
+                chunk=chunk,
+                distance=distance,
+                score=None,
+            )
+        )
+        if score is not None:
+            scored_items.append((business_key, score))
+        seen_businesses.add(business_key)
+        if len(results) >= payload.top_k:
+            break
+    if scored_items:
+        distances_only = [item[1] for item in scored_items]
+        min_distance = min(distances_only)
+        max_distance = max(distances_only)
+        if max_distance == min_distance:
+            normalized_scores = {item[0]: 1.0 for item in scored_items}
+        else:
+            normalized_scores = {
+                item[0]: 1.0 - ((item[1] - min_distance) / (max_distance - min_distance))
+                for item in scored_items
+            }
+        for item in results:
+            if item.business_url in normalized_scores:
+                item.score = round(normalized_scores[item.business_url], 6)
+        top_list = [
+            QueryChromaTopItem(business_url=url, score=score)
+            for url, score in sorted(
+                normalized_scores.items(), key=lambda pair: pair[1], reverse=True
+            )
+        ]
+    else:
+        top_list = []
+    return QueryChromaResponse(query=payload.query, results=results, top_list=top_list)
