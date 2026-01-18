@@ -129,21 +129,83 @@
             </div>
           </div>
 
-          <div class="analytics-grid">
-            <div class="panel">
-              <h3>Visibility Map</h3>
-              <p>Track where your business appears in AI answers.</p>
-              <div class="panel-graphic gradient"></div>
+          <div class="analytics-workflow">
+            <div class="panel analytics-progress">
+              <div class="progress-header">
+                <div>
+                  <h3>Analysis Progress</h3>
+                  <p id="analysisStatus">Waiting for a business to analyze.</p>
+                </div>
+                <div class="progress-percent" id="analysisPercent">0%</div>
+              </div>
+              <div class="progress-bar">
+                <div class="progress-fill" id="analysisProgress"></div>
+              </div>
+              <div class="progress-steps" id="analysisSteps"></div>
             </div>
-            <div class="panel">
-              <h3>Answer Quality</h3>
-              <p>See coverage, completeness, and citation strength.</p>
-              <div class="panel-graphic dots"></div>
+
+            <div class="panel analytics-summary">
+              <h3>Visibility Score</h3>
+              <div class="score-value" id="analysisScore">--</div>
+              <div class="score-meta">
+                <div>
+                  <span class="meta-label">Presence rate</span>
+                  <span class="meta-value" id="analysisPresence">--</span>
+                </div>
+                <div>
+                  <span class="meta-label">Average rank</span>
+                  <span class="meta-value" id="analysisAvgRank">--</span>
+                </div>
+                <div>
+                  <span class="meta-label">Queries</span>
+                  <span class="meta-value" id="analysisQueries">--</span>
+                </div>
+              </div>
             </div>
-            <div class="panel">
-              <h3>Competitive Gap</h3>
-              <p>Identify who outranks you and why.</p>
-              <div class="panel-graphic bars"></div>
+
+            <div class="panel analytics-competitors">
+              <div class="competitors-header">
+                <h3>Top Competitors</h3>
+                <div class="competitors-score" id="analysisCompetitorBase">--</div>
+              </div>
+              <p>Visibility score compared to this business.</p>
+              <div class="competitor-list" id="analysisCompetitors"></div>
+            </div>
+          </div>
+
+          <div class="panel analytics-empty" id="analysisEmpty">
+            <h3>Run an analysis</h3>
+            <p>Select a business, click Analyze, and we will generate queries, run them against the index, and compute a visibility score.</p>
+          </div>
+
+          <div class="panel analytics-results" id="analysisResults">
+            <div class="results-header">
+              <div>
+                <h3>Query Breakdown</h3>
+                <p>See which questions surface your business and who else ranks.</p>
+              </div>
+              <div class="results-meta">
+                <div>
+                  <span class="meta-label">Business</span>
+                  <span class="meta-value" id="analysisBusiness">--</span>
+                </div>
+                <div>
+                  <span class="meta-label">Status</span>
+                  <span class="meta-value" id="analysisCompletion">--</span>
+                </div>
+              </div>
+            </div>
+            <div class="results-table" id="analysisTable"></div>
+            <div class="blog-panel">
+              <div class="blog-header">
+                <h4>Generated Blog Article</h4>
+                <span class="blog-status" id="blogStatus">Pick a question to generate.</span>
+              </div>
+              <div class="blog-content" id="blogContent"></div>
+              <div class="blog-actions">
+                <button type="button" class="blog-action" id="blogReindexButton" disabled>Reindex Blog</button>
+                <button type="button" class="blog-action ghost-action" id="blogResetButton" disabled>Reset</button>
+              </div>
             </div>
           </div>
         </section>

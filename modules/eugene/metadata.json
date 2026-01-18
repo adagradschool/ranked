@@ -1,0 +1,9 @@
+
+{
+  "name": "RankedGPT AI Search",
+  "description": "A clean, expert-focused AI search and chat interface with integrated Google Search grounding.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}

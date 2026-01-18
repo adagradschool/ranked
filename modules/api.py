@@ -3,6 +3,10 @@ import html
 import logging
 import os
 import re
+import threading
+import time
+import uuid
+from urllib.parse import urlparse
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -18,6 +22,7 @@ from openai import OpenAI
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 
+from modules.question_agent import generate_questions
 
 DEFAULT_RAG_DIR = "rag_index"
 DEFAULT_COLLECTION = "exa_rag"
@@ -243,6 +248,15 @@ class ReindexBlogResponse(BaseModel):
     chunks_indexed: int
 
 
+class DeleteBlogRequest(BaseModel):
+    blog_url: str = Field(..., min_length=5)
+
+
+class DeleteBlogResponse(BaseModel):
+    blog_url: str
+    chunks_deleted: int
+
+
 class QueryChromaRequest(BaseModel):
     query: str = Field(..., min_length=1)
     top_k: int = Field(10, ge=1, le=20)
@@ -283,18 +297,78 @@ class RagChatResponse(BaseModel):
     sources: list[str]
 
 
+class AnalyticsStartRequest(BaseModel):
+    business_name: str = Field(..., min_length=1)
+    num_queries: int = Field(10, ge=3, le=20)
+    top_k: int = Field(10, ge=3, le=20)
+    max_documents: int = Field(200, ge=10, le=2000)
+    max_context_chars: int = Field(8000, ge=1000, le=20000)
+
+
+class AnalyticsQueryTopBusiness(BaseModel):
+    rank: int
+    business_name: str
+    business_url: str
+
+
+class AnalyticsQueryResult(BaseModel):
+    query: str
+    intent: str | None = None
+    found: bool
+    rank: int | None = None
+    top_businesses: list[AnalyticsQueryTopBusiness]
+
+
+class AnalyticsCompetitor(BaseModel):
+    business_name: str
+    business_url: str
+    visibility_score: float
+
+
+class AnalyticsResult(BaseModel):
+    business_name: str
+    matched_business_name: str
+    score: float
+    presence_rate: float
+    average_rank: float | None = None
+    total_queries: int
+    queries: list[AnalyticsQueryResult]
+    leaderboard: list[AnalyticsCompetitor]
+    top_competitors: list[AnalyticsCompetitor]
+
+
+class AnalyticsStep(BaseModel):
+    label: str
+    status: str
+
+
+class AnalyticsStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    stage: str
+    progress: float
+    steps: list[AnalyticsStep]
+    result: AnalyticsResult | None = None
+    error: str | None = None
+
+
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
 
 app = FastAPI(title="Ranked Blog API")
 app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
+analytics_logger = logging.getLogger("ranked.analytics")
 
 
 @app.on_event("startup")
 def startup() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     load_dotenv()
     app.state.store = RagStore.from_env()
     app.state.store.refresh_business_names()
     logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    app.state.analytics_jobs = {}
+    app.state.analytics_lock = threading.Lock()
+    app.state.question_cache = {}
 
 
 @app.get("/")
@@ -311,6 +385,319 @@ def get_store() -> RagStore:
         store = RagStore.from_env()
         app.state.store = store
     return store
+
+
+def get_question_cache() -> dict[tuple[str, int], list[dict[str, str]]]:
+    cache = getattr(app.state, "question_cache", None)
+    if cache is None:
+        app.state.question_cache = {}
+    return app.state.question_cache
+
+
+def get_analytics_store() -> tuple[dict, threading.Lock]:
+    jobs = getattr(app.state, "analytics_jobs", None)
+    lock = getattr(app.state, "analytics_lock", None)
+    if jobs is None or lock is None:
+        app.state.analytics_jobs = {}
+        app.state.analytics_lock = threading.Lock()
+    return app.state.analytics_jobs, app.state.analytics_lock
+
+
+def build_default_steps() -> list[dict]:
+    return [
+        {"label": "Load business content", "status": "pending"},
+        {"label": "Generate search questions", "status": "pending"},
+        {"label": "Querying LLMs", "status": "pending"},
+        {"label": "Compute visibility score", "status": "pending"},
+    ]
+
+
+def update_job(job_id: str, **updates: Any) -> None:
+    jobs, lock = get_analytics_store()
+    with lock:
+        job = jobs.get(job_id)
+        if not job:
+            return
+        job.update(updates)
+        job["updated_at"] = time.time()
+
+
+def set_step_status(steps: list[dict], index: int, status: str) -> list[dict]:
+    if 0 <= index < len(steps):
+        steps[index] = {"label": steps[index]["label"], "status": status}
+    return steps
+
+
+def collect_business_metadata(store: RagStore, business_name: str) -> tuple[set[str], str]:
+    data = store.collection.get(
+        where={"business_name": {"$eq": business_name}},
+        include=["metadatas"],
+    )
+    metadatas = data.get("metadatas") or []
+    urls: set[str] = set()
+    category = ""
+    for metadata in metadatas:
+        if not metadata:
+            continue
+        url = metadata.get("business_url") or metadata.get("url") or ""
+        if url:
+            urls.add(url)
+        if not category and metadata.get("category"):
+            category = metadata.get("category") or ""
+    return urls, category
+
+
+def query_top_businesses(
+    store: RagStore,
+    query: str,
+    top_k: int,
+) -> list[AnalyticsQueryTopBusiness]:
+    fetch_k = min(max(top_k * 4, top_k), 60)
+    result = store.collection.query(
+        query_texts=[query],
+        n_results=fetch_k,
+        include=["metadatas", "distances"],
+    )
+    metas = result.get("metadatas", [[]])[0]
+    distances = result.get("distances", [[]])[0]
+    top_items: list[AnalyticsQueryTopBusiness] = []
+    seen: set[str] = set()
+    for meta, distance in zip(metas, distances):
+        metadata = meta or {}
+        business_url = metadata.get("business_url") or metadata.get("url") or ""
+        business_name = metadata.get("business_name")
+        if not business_name:
+            if business_url:
+                parsed = urlparse(business_url)
+                business_name = parsed.netloc or business_url
+            else:
+                business_name = "Unknown"
+        key = business_url or business_name
+        if key in seen:
+            continue
+        seen.add(key)
+        top_items.append(
+            AnalyticsQueryTopBusiness(
+                rank=len(top_items) + 1,
+                business_name=business_name,
+                business_url=business_url,
+            )
+        )
+        if len(top_items) >= top_k:
+            break
+    return top_items
+
+
+def compute_elo_leaderboard(
+    query_results: list[AnalyticsQueryResult],
+    k_factor: float = 24.0,
+) -> list[AnalyticsCompetitor]:
+    ratings: dict[str, float] = {}
+    labels: dict[str, tuple[str, str]] = {}
+
+    for result in query_results:
+        ordered = result.top_businesses or []
+        for item in ordered:
+            key = item.business_url or item.business_name
+            if key not in ratings:
+                ratings[key] = 1000.0
+                labels[key] = (item.business_name, item.business_url)
+        for i, winner in enumerate(ordered):
+            winner_key = winner.business_url or winner.business_name
+            for loser in ordered[i + 1 :]:
+                loser_key = loser.business_url or loser.business_name
+                ra = ratings[winner_key]
+                rb = ratings[loser_key]
+                expected_a = 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+                expected_b = 1.0 - expected_a
+                ratings[winner_key] = ra + k_factor * (1.0 - expected_a)
+                ratings[loser_key] = rb + k_factor * (0.0 - expected_b)
+
+    if not ratings:
+        return []
+    baseline = 1200.0
+    scale = 400.0
+    leaderboard: list[AnalyticsCompetitor] = []
+    for key, rating in ratings.items():
+        score = 100.0 * (1.0 / (1.0 + 10 ** ((baseline - rating) / scale)))
+        name, url = labels.get(key, (key, ""))
+        leaderboard.append(
+            AnalyticsCompetitor(
+                business_name=name or key,
+                business_url=url,
+                visibility_score=round(score, 2),
+            )
+        )
+    leaderboard.sort(key=lambda item: item.visibility_score, reverse=True)
+    return leaderboard
+
+
+def run_analytics_job(job_id: str, payload: AnalyticsStartRequest) -> None:
+    store = get_store()
+    steps = build_default_steps()
+    current_step = 0
+    steps = set_step_status(steps, current_step, "active")
+    analytics_logger.info("analytics job %s started for business=%s", job_id, payload.business_name)
+    update_job(
+        job_id,
+        status="running",
+        stage="Loading business content",
+        progress=5.0,
+        steps=steps,
+    )
+    try:
+        matched_name, documents, _, context = fetch_business_documents(
+            store,
+            payload.business_name,
+            payload.max_documents,
+            payload.max_context_chars,
+        )
+        if not documents:
+            raise ValueError("Business not found in the RAG index.")
+        analytics_logger.info("analytics job %s loaded %s documents", job_id, len(documents))
+        steps = set_step_status(steps, 0, "done")
+        current_step = 1
+        steps = set_step_status(steps, current_step, "active")
+        update_job(job_id, stage="Generating questions", progress=20.0, steps=steps)
+
+        if not store.openai_client:
+            openai_key = os.environ.get("OPENAI_API_KEY")
+            if openai_key:
+                store.openai_client = OpenAI(api_key=openai_key)
+        if not store.openai_client:
+            raise ValueError("OpenAI client not configured for question generation.")
+
+        business_urls, category = collect_business_metadata(store, matched_name)
+        cache_key = (normalize_name(matched_name), payload.num_queries)
+        question_cache = get_question_cache()
+        cached = question_cache.get(cache_key)
+        if cached:
+            questions = cached
+            analytics_logger.info("analytics job %s loaded %s cached questions", job_id, len(questions))
+        else:
+            raw_questions = generate_questions(
+                store.openai_client,
+                context,
+                business_name=matched_name,
+                category=category,
+                model=store.openai_model,
+                num_queries=payload.num_queries,
+            )
+            questions = []
+            for item in raw_questions:
+                query = (item.get("query") or "").strip()
+                if query:
+                    questions.append({"query": query, "intent": item.get("intent")})
+            if not questions:
+                raise ValueError("No questions generated for this business.")
+            questions = questions[: payload.num_queries]
+            question_cache[cache_key] = questions
+            analytics_logger.info("analytics job %s generated %s questions", job_id, len(questions))
+
+        steps = set_step_status(steps, 1, "done")
+        current_step = 2
+        steps = set_step_status(steps, current_step, "active")
+        update_job(job_id, stage="Querying LLMs", progress=30.0, steps=steps)
+
+        query_results: list[AnalyticsQueryResult] = []
+        total = len(questions)
+        target_norm = normalize_name(matched_name)
+        for index, question in enumerate(questions):
+            top_businesses = query_top_businesses(store, question["query"], payload.top_k)
+            rank = None
+            found = False
+            for item in top_businesses:
+                candidate_norm = normalize_name(item.business_name)
+                if candidate_norm == target_norm or item.business_url in business_urls:
+                    rank = item.rank
+                    found = True
+                    break
+            query_results.append(
+                AnalyticsQueryResult(
+                    query=question["query"],
+                    intent=question.get("intent"),
+                    found=found,
+                    rank=rank,
+                    top_businesses=top_businesses,
+                )
+            )
+            progress = 30.0 + ((index + 1) / max(total, 1)) * 55.0
+            update_job(
+                job_id,
+                stage=f"Querying LLMs ({index + 1}/{total})",
+                progress=round(progress, 2),
+                steps=steps,
+            )
+        analytics_logger.info("analytics job %s completed chroma queries", job_id)
+
+        steps = set_step_status(steps, 2, "done")
+        current_step = 3
+        steps = set_step_status(steps, current_step, "active")
+        update_job(job_id, stage="Computing score", progress=90.0, steps=steps)
+
+        total_queries = len(query_results)
+        present_count = sum(1 for item in query_results if item.found and item.rank)
+        rank_sum = sum(item.rank for item in query_results if item.rank)
+        average_rank = (rank_sum / present_count) if present_count else None
+        presence_rate = (present_count / total_queries) * 100.0 if total_queries else 0.0
+
+        leaderboard = compute_elo_leaderboard(query_results)
+        score = 0.0
+        if leaderboard:
+            target_norm = normalize_name(matched_name)
+            target_score = None
+            for entry in leaderboard:
+                candidate_norm = normalize_name(entry.business_name)
+                if candidate_norm == target_norm or entry.business_url in business_urls:
+                    target_score = entry.visibility_score
+                    break
+            score = target_score if target_score is not None else leaderboard[0].visibility_score
+        top_competitors = [
+            item
+            for item in leaderboard
+            if normalize_name(item.business_name) != target_norm
+            and (item.business_url not in business_urls if business_urls else True)
+        ]
+        top_competitors = top_competitors[:5]
+
+        steps = set_step_status(steps, 3, "done")
+        result = AnalyticsResult(
+            business_name=payload.business_name,
+            matched_business_name=matched_name,
+            score=round(score, 2),
+            presence_rate=round(presence_rate, 2),
+            average_rank=round(average_rank, 2) if average_rank else None,
+            total_queries=total_queries,
+            queries=query_results,
+            leaderboard=leaderboard,
+            top_competitors=top_competitors,
+        )
+        update_job(
+            job_id,
+            status="completed",
+            stage="Complete",
+            progress=100.0,
+            steps=steps,
+            result=result,
+        )
+        analytics_logger.info(
+            "analytics job %s completed score=%.2f presence=%.2f avg_rank=%s",
+            job_id,
+            result.score,
+            result.presence_rate,
+            result.average_rank,
+        )
+    except Exception as exc:
+        steps = set_step_status(steps, current_step, "error")
+        update_job(
+            job_id,
+            status="failed",
+            stage="Failed",
+            progress=100.0,
+            steps=steps,
+            error=str(exc),
+        )
+        analytics_logger.exception("analytics job %s failed", job_id)
 
 
 def fetch_business_documents(
@@ -503,7 +890,22 @@ def reindex_blog(payload: ReindexBlogRequest) -> ReindexBlogResponse:
     )
     if not chunks_indexed:
         raise HTTPException(status_code=400, detail="No indexable content in HTML.")
+    analytics_logger.info("reindexed blog %s with %s chunks", payload.blog_url, chunks_indexed)
     return ReindexBlogResponse(blog_url=payload.blog_url, chunks_indexed=chunks_indexed)
+
+
+@app.post("/delete-blog", response_model=DeleteBlogResponse)
+def delete_blog(payload: DeleteBlogRequest) -> DeleteBlogResponse:
+    store = get_store()
+    data = store.collection.get(where={"url": {"$eq": payload.blog_url}}, include=[])
+    ids = data.get("ids") or []
+    if ids:
+        try:
+            store.collection.delete(ids=ids)
+        except Exception:
+            store.collection.delete(where={"url": {"$eq": payload.blog_url}})
+    analytics_logger.info("deleted blog %s with %s chunks", payload.blog_url, len(ids))
+    return DeleteBlogResponse(blog_url=payload.blog_url, chunks_deleted=len(ids))
 
 
 @app.post("/query-chroma", response_model=QueryChromaResponse)
@@ -564,6 +966,43 @@ def query_chroma(payload: QueryChromaRequest) -> QueryChromaResponse:
     else:
         top_list = []
     return QueryChromaResponse(query=payload.query, results=results, top_list=top_list)
+
+
+@app.post("/analytics/start", response_model=AnalyticsStatusResponse)
+def start_analytics(payload: AnalyticsStartRequest) -> AnalyticsStatusResponse:
+    jobs, lock = get_analytics_store()
+    job_id = uuid.uuid4().hex
+    job = {
+        "job_id": job_id,
+        "status": "queued",
+        "stage": "Queued",
+        "progress": 0.0,
+        "steps": build_default_steps(),
+        "result": None,
+        "error": None,
+        "created_at": time.time(),
+        "updated_at": time.time(),
+    }
+    with lock:
+        jobs[job_id] = job
+    analytics_logger.info("analytics job %s queued for business=%s", job_id, payload.business_name)
+    worker = threading.Thread(
+        target=run_analytics_job,
+        args=(job_id, payload),
+        daemon=True,
+    )
+    worker.start()
+    return AnalyticsStatusResponse(**job)
+
+
+@app.get("/analytics/status/{job_id}", response_model=AnalyticsStatusResponse)
+def analytics_status(job_id: str) -> AnalyticsStatusResponse:
+    jobs, lock = get_analytics_store()
+    with lock:
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(status_code=404, detail="Analytics job not found.")
+        return AnalyticsStatusResponse(**job)
 
 
 @app.get("/businesses", response_model=BusinessListResponse)
