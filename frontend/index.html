@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>RankedGPT</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Sora:wght@400;500;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <aside class="sidebar">
+        <div class="brand" id="brandHome">
+          <span class="brand-mark">Ranked</span>
+        </div>
+        <nav class="nav">
+          <button class="nav-item active" data-tab="chat">
+            <span class="nav-dot"></span>
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path
+                  d="M4 5.5h16a2 2 0 0 1 2 2v6.5a2 2 0 0 1-2 2H9l-5 3v-3H4a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2Z"
+                  fill="currentColor"
+                />
+              </svg>
+            </span>
+            GPT
+          </button>
+          <button class="nav-item" data-tab="analytics">
+            <span class="nav-dot"></span>
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" role="img">
+                <path
+                  d="M4 20h16M7 16v-5m5 5V6m5 10v-8"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  fill="none"
+                />
+              </svg>
+            </span>
+            Analytics
+          </button>
+        </nav>
+        <div class="sidebar-footer">
+          <div class="status">
+            <span class="status-dot"></span>
+            Live Index
+          </div>
+          <button class="ghost" id="settingsButton">Settings</button>
+        </div>
+      </aside>
+
+      <main class="content">
+        <header class="topbar">
+          <div class="breadcrumbs">Workspace / Ranked</div>
+          <div class="topbar-actions">
+            <button class="icon-button" id="helpButton" aria-label="Help">
+              <svg viewBox="0 0 24 24" role="img" aria-hidden="true">
+                <path
+                  d="M12 17v.5M9 9a3 3 0 1 1 5.2 2c-.8.7-1.2 1.2-1.2 2"
+                  stroke="currentColor"
+                  stroke-width="2"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  fill="none"
+                />
+                <circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="2" fill="none" />
+              </svg>
+            </button>
+            <button class="icon-button" id="gearButton" aria-label="Settings">
+              <svg viewBox="0 0 24 24" role="img" aria-hidden="true">
+                <path
+                  d="M12 3l1.2 2.4 2.6.4-1.9 1.8.4 2.6L12 8.9l-2.3 1.2.4-2.6-1.9-1.8 2.6-.4L12 3Z"
+                  fill="currentColor"
+                />
+                <circle cx="12" cy="13" r="3" fill="#fff" />
+              </svg>
+            </button>
+            <div class="avatar" id="avatarButton">AG</div>
+          </div>
+        </header>
+
+        <section id="chat" class="tab-panel active">
+          <div class="hero">
+            <h1 class="hero-title">
+              Ranked<span class="hero-accent">GPT</span>
+            </h1>
+          </div>
+
+          <div class="chat-shell">
+            <div class="chat-messages" id="chatMessages">
+            </div>
+            <form class="chat-input" id="chatForm">
+              <input
+                id="chatInput"
+                type="text"
+                placeholder="Search across all AI models..."
+                autocomplete="off"
+              />
+              <button type="submit" class="send">&#10148;</button>
+            </form>
+          </div>
+        </section>
+
+        <section id="analytics" class="tab-panel">
+          <div class="analytics-header">
+            <div>
+              <h2>Ranked Analytics</h2>
+              <p>Compare visibility, sentiment, and answer quality across AI platforms.</p>
+            </div>
+            <div class="analytics-search">
+              <div class="search-box">
+                <input
+                  id="businessSearch"
+                  type="text"
+                  placeholder="Search for a business..."
+                  autocomplete="off"
+                />
+                <div class="dropdown" id="businessDropdown"></div>
+              </div>
+              <button class="analyze" id="analyzeButton">Analyze</button>
+            </div>
+          </div>
+
+          <div class="analytics-grid">
+            <div class="panel">
+              <h3>Visibility Map</h3>
+              <p>Track where your business appears in AI answers.</p>
+              <div class="panel-graphic gradient"></div>
+            </div>
+            <div class="panel">
+              <h3>Answer Quality</h3>
+              <p>See coverage, completeness, and citation strength.</p>
+              <div class="panel-graphic dots"></div>
+            </div>
+            <div class="panel">
+              <h3>Competitive Gap</h3>
+              <p>Identify who outranks you and why.</p>
+              <div class="panel-graphic bars"></div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="/static/app.js"></script>
+  </body>
+</html>

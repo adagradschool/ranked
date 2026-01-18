@@ -10,7 +10,10 @@ from typing import Any
 
 import chromadb
 from bs4 import BeautifulSoup
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
@@ -78,6 +81,32 @@ def build_blog_prompt(business_name: str, question: str, context: str) -> list[d
             ).format(business_name=business_name, question=question, context=context),
         },
     ]
+
+
+def build_rag_chat_prompt(question: str, context: str) -> list[dict[str, str]]:
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are RankedGPT, a concise assistant for business research. "
+                "Answer using only the provided context. "
+                "Return the response in markdown. "
+                "If the answer is not in the context, say you do not have enough data."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Question: {question}\n\nContext:\n{context}",
+        },
+    ]
+
+
+def extract_fallback_answer(context: str, max_sentences: int = 3) -> str:
+    sentences = re.split(r"(?<=[.!?])\\s+", context.strip())
+    trimmed = [s for s in sentences if s]
+    if not trimmed:
+        return "I do not have enough data to answer that based on the current index."
+    return " ".join(trimmed[:max_sentences])
 
 
 def render_fallback_html(business_name: str, question: str, context: str) -> str:
@@ -238,13 +267,42 @@ class QueryChromaResponse(BaseModel):
     top_list: list[QueryChromaTopItem]
 
 
+class BusinessListResponse(BaseModel):
+    businesses: list[str]
+
+
+class RagChatRequest(BaseModel):
+    question: str = Field(..., min_length=3)
+    top_k: int = Field(6, ge=1, le=20)
+    max_context_chars: int = Field(6000, ge=500, le=20000)
+
+
+class RagChatResponse(BaseModel):
+    question: str
+    answer: str
+    sources: list[str]
+
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
 app = FastAPI(title="Ranked Blog API")
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 
 @app.on_event("startup")
 def startup() -> None:
+    load_dotenv()
     app.state.store = RagStore.from_env()
+    app.state.store.refresh_business_names()
     logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+
+
+@app.get("/")
+def serve_frontend() -> FileResponse:
+    index_path = FRONTEND_DIR / "index.html"
+    if not index_path.exists():
+        raise HTTPException(status_code=404, detail="Frontend not found.")
+    return FileResponse(index_path)
 
 
 def get_store() -> RagStore:
@@ -506,3 +564,70 @@ def query_chroma(payload: QueryChromaRequest) -> QueryChromaResponse:
     else:
         top_list = []
     return QueryChromaResponse(query=payload.query, results=results, top_list=top_list)
+
+
+@app.get("/businesses", response_model=BusinessListResponse)
+def list_businesses(
+    q: str | None = Query(default=None, max_length=80),
+    limit: int = Query(default=20, ge=1, le=200),
+) -> BusinessListResponse:
+    store = get_store()
+    if not store.business_names:
+        store.refresh_business_names()
+    names = store.business_names or []
+    if q:
+        token = normalize_name(q)
+        filtered = []
+        for name in names:
+            if token in normalize_name(name):
+                filtered.append(name)
+        names = filtered
+    return BusinessListResponse(businesses=names[:limit])
+
+
+@app.post("/rag-chat", response_model=RagChatResponse)
+def rag_chat(payload: RagChatRequest) -> RagChatResponse:
+    store = get_store()
+    if not store.openai_client:
+        openai_key = os.environ.get("OPENAI_API_KEY")
+        if openai_key:
+            store.openai_client = OpenAI(api_key=openai_key)
+    result = store.collection.query(
+        query_texts=[payload.question],
+        n_results=max(payload.top_k * 3, payload.top_k),
+        include=["documents", "metadatas"],
+    )
+    docs = result.get("documents", [[]])[0]
+    metas = result.get("metadatas", [[]])[0]
+    if not docs:
+        raise HTTPException(status_code=404, detail="No matching context found.")
+
+    sources = []
+    context_parts = []
+    size = 0
+    for doc, meta in zip(docs, metas):
+        if doc:
+            context_parts.append(doc)
+            size += len(doc)
+        url = (meta or {}).get("url")
+        if url and url not in sources:
+            sources.append(url)
+        if size >= payload.max_context_chars:
+            break
+    context = "\n".join(context_parts)[: payload.max_context_chars]
+
+    answer = ""
+    if store.openai_client:
+        response = store.openai_client.responses.create(
+            model=store.openai_model,
+            input=build_rag_chat_prompt(payload.question, context),
+        )
+        answer = (response.output_text or "").strip()
+
+    if not answer:
+        answer = extract_fallback_answer(context)
+
+    if sources:
+        sources_md = "\n".join(f"- {source}" for source in sources)
+        answer = f"{answer}\n\nSources:\n{sources_md}"
+    return RagChatResponse(question=payload.question, answer=answer, sources=sources)
