@@ -39,4 +39,7 @@ inspect-chroma:
     .venv/bin/python -c 'import chromadb; client=chromadb.PersistentClient(path="{{output_dir}}"); col=client.get_collection("{{collection}}"); print("count", col.count()); print(col.get(limit=3, include=["metadatas", "documents"]))'
 
 query-chroma QUERY:
-    .venv/bin/python -c 'import sys, chromadb; client=chromadb.PersistentClient(path="{{output_dir}}"); col=client.get_collection("{{collection}}"); q=sys.argv[1]; print(col.query(query_texts=[q], n_results=3, include=["documents", "metadatas", "distances"]))' "{{QUERY}}"
+    .venv/bin/python -c 'import sys, chromadb; client=chromadb.PersistentClient(path="{{output_dir}}"); col=client.get_collection("{{collection}}"); q=sys.argv[1]; result=col.query(query_texts=[q], n_results=5, include=["documents", "metadatas", "distances"]); docs=result.get("documents", [[]])[0]; print("top 5"); [print("----\\n", " ".join(doc.split()[:100])) for doc in docs]' "{{QUERY}}"
+
+serve *ARGS:
+    .venv/bin/uvicorn modules.api:app --reload {{ARGS}}
